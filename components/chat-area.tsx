@@ -1,12 +1,13 @@
 "use client"
 
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { Send, GitGraph, Bot, ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { api, type SessionDetail, type Message } from "@/lib/api"
 
 type MessageType = "user" | "agent" | "system" | "thought"
 
-interface Message {
+interface DisplayMessage {
   id: string
   type: MessageType
   content: string
@@ -14,58 +15,32 @@ interface Message {
   thoughtContent?: string
 }
 
-const mockMessages: Message[] = [
-  {
-    id: "1",
-    type: "user",
-    content: "Can you debug the authentication middleware? It's returning 401 for valid tokens.",
-  },
-  {
-    id: "2",
-    type: "system",
-    content: "Orchestrator invoked DebugAgent",
-  },
-  {
-    id: "3",
-    type: "thought",
-    content: "",
-    thoughtContent:
-      "1. Analyzing the auth middleware at /middleware/auth.ts\n2. Token validation uses jwt.verify() with HS256\n3. Found issue: token expiry check uses seconds but Date.now() returns ms\n4. The comparison `exp < Date.now()` always evaluates true\n5. Fix: change to `exp < Math.floor(Date.now() / 1000)`",
-    agentName: "DebugAgent",
-  },
-  {
-    id: "4",
-    type: "agent",
-    content:
-      "I found the bug. In your auth middleware, the token expiry comparison is incorrect. `exp` from JWT is in seconds, but `Date.now()` returns milliseconds. Change the check to:\n\n```\nif (exp < Math.floor(Date.now() / 1000)) {\n  throw new TokenExpiredError()\n}\n```\n\nThis will fix the false 401 responses for valid tokens.",
-    agentName: "DebugAgent",
-  },
-  {
-    id: "5",
-    type: "user",
-    content: "Great catch. Can you also check if there are any other timestamp-related issues in the codebase?",
-  },
-  {
-    id: "6",
-    type: "system",
-    content: "Orchestrator invoked SearchTool",
-  },
-  {
-    id: "7",
-    type: "thought",
-    content: "",
-    thoughtContent:
-      "1. Searching codebase for Date.now() comparisons with JWT fields\n2. Found 3 files with similar patterns\n3. /utils/session.ts - same issue on line 42\n4. /handlers/refresh.ts - correctly uses seconds\n5. /cron/cleanup.ts - uses Date.now() directly with DB timestamps (epoch ms) - OK",
-    agentName: "SearchAgent",
-  },
-  {
-    id: "8",
-    type: "agent",
-    content:
-      "I scanned the full codebase and found one more instance of the same bug in `/utils/session.ts` at line 42. The refresh handler and cron cleanup are both correct. I recommend applying the same fix to session.ts.",
-    agentName: "SearchAgent",
-  },
-]
+function thoughtContentFromMessage(m: Message): string | undefined {
+  const tp = m.thought_process
+  if (!tp) return undefined
+  if (typeof tp === "string") return tp
+  if (Array.isArray(tp)) {
+    const parts = tp.map((p: unknown) => (p && typeof p === "object" && "text" in p) ? String((p as { text: string }).text) : String(p))
+    return parts.join("\n")
+  }
+  return undefined
+}
+
+function messagesToDisplay(messages: Message[]): DisplayMessage[] {
+  const out: DisplayMessage[] = []
+  for (const m of messages) {
+    const thought = thoughtContentFromMessage(m)
+    if (m.role === "user") {
+      out.push({ id: m.id, type: "user", content: m.content })
+    } else if (m.role === "assistant") {
+      if (thought) {
+        out.push({ id: m.id + "-thought", type: "thought", content: "", thoughtContent: thought })
+      }
+      out.push({ id: m.id, type: "agent", content: m.content, agentName: "Assistant" })
+    }
+  }
+  return out
+}
 
 function ThoughtBlock({ content }: { content: string }) {
   const [isOpen, setIsOpen] = useState(false)
@@ -134,22 +109,82 @@ function SystemEvent({ content }: { content: string }) {
 }
 
 interface ChatAreaProps {
+  sessionId: string | null
+  sessionTitle?: string
   onViewTopology: () => void
 }
 
-export function ChatArea({ onViewTopology }: ChatAreaProps) {
+export function ChatArea({ sessionId, sessionTitle, onViewTopology }: ChatAreaProps) {
   const [inputValue, setInputValue] = useState("")
+  const [session, setSession] = useState<SessionDetail | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  const fetchSession = useCallback(async () => {
+    if (!sessionId) {
+      setSession(null)
+      return
+    }
+    try {
+      setLoading(true)
+      setError(null)
+      const data = await api.get<SessionDetail>(`/api/sessions/${sessionId}`)
+      setSession(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load session")
+      setSession(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    fetchSession()
+  }, [fetchSession])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [])
+  }, [session?.messages])
+
+  const handleSend = async () => {
+    const msg = inputValue.trim()
+    if (!msg || !sessionId) return
+    try {
+      setSending(true)
+      setInputValue("")
+      await api.post("/api/chat/send", { session_id: sessionId, message: msg })
+      await fetchSession()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to send message")
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const displayMessages = session?.messages ? messagesToDisplay(session.messages) : []
+
+  if (!sessionId) {
+    return (
+      <section className="flex flex-1 flex-col items-center justify-center bg-background" aria-label="Chat area">
+        <p className="text-sm text-muted-foreground">Select a session or create a new one</p>
+      </section>
+    )
+  }
+
+  if (loading && !session) {
+    return (
+      <section className="flex flex-1 flex-col items-center justify-center bg-background" aria-label="Chat area">
+        <span className="text-sm text-muted-foreground">Loading...</span>
+      </section>
+    )
+  }
 
   return (
     <section className="flex flex-1 flex-col bg-background" aria-label="Chat area">
-      {/* Header */}
       <header className="flex h-14 items-center justify-between border-b border-border px-5">
-        <h1 className="text-sm font-semibold text-foreground">Debug Session #402</h1>
+        <h1 className="text-sm font-semibold text-foreground">{sessionTitle || session?.title || "Chat"}</h1>
         <button
           onClick={onViewTopology}
           className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
@@ -159,10 +194,15 @@ export function ChatArea({ onViewTopology }: ChatAreaProps) {
         </button>
       </header>
 
-      {/* Messages */}
+      {error && (
+        <div className="border-b border-border bg-destructive/10 px-5 py-2">
+          <span className="text-xs text-destructive">{error}</span>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto py-6">
         <div className="flex flex-col gap-4">
-          {mockMessages.map((msg) => {
+          {displayMessages.map((msg) => {
             switch (msg.type) {
               case "user":
                 return <UserMessage key={msg.id} content={msg.content} />
@@ -182,7 +222,6 @@ export function ChatArea({ onViewTopology }: ChatAreaProps) {
         </div>
       </div>
 
-      {/* Input */}
       <div className="border-t border-border p-4">
         <div className="flex gap-2">
           <textarea
@@ -195,12 +234,14 @@ export function ChatArea({ onViewTopology }: ChatAreaProps) {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault()
+                handleSend()
               }
             }}
           />
           <button
+            onClick={handleSend}
+            disabled={!inputValue.trim() || sending}
             className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
-            disabled={!inputValue.trim()}
             aria-label="Send message"
           >
             <Send className="h-4 w-4" aria-hidden="true" />

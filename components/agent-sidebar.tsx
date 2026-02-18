@@ -1,144 +1,275 @@
 "use client"
 
-import { useState } from "react"
-import { ArrowLeft, Bot, Search as SearchIcon, Code2, Eye, FileText, Globe, Terminal, FileCode as FileCodeIcon, Braces, Search } from "lucide-react"
+import { useState, useEffect, useCallback, useRef } from "react"
+import {
+  ArrowLeft,
+  Bot,
+  Search as SearchIcon,
+  Code2,
+  Eye,
+  FileText,
+  Globe,
+  Terminal,
+  FileCode as FileCodeIcon,
+  Braces,
+  Search,
+  Wrench,
+  Plus,
+  X,
+} from "lucide-react"
 import { cn } from "@/lib/utils"
+import { api, type Agent as ApiAgent, type Skill as ApiSkill, type SessionAgent, type Provider, type LLM } from "@/lib/api"
+
+const ROLE_ICONS: Record<string, React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>> = {
+  Orchestrator: Bot,
+  "Code Generation": Code2,
+  "Code Review": Eye,
+  "Information Retrieval": SearchIcon,
+  Summarization: FileText,
+  default: Bot,
+}
+
+function getIconForAgent(agent: ApiAgent) {
+  const role = agent.role || ""
+  return ROLE_ICONS[role] || ROLE_ICONS.default
+}
+
+interface AgentDisplay {
+  id: string
+  name: string
+  role: string
+  modelId: string | null
+  providerId: string | null
+  modelLabel: string
+  temperature: number
+  prompt: string
+  icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>
+  status: "active" | "idle"
+  skillIds: string[]
+}
+
+function toDisplayAgent(a: ApiAgent): AgentDisplay {
+  const Icon = getIconForAgent(a)
+  return {
+    id: a.id,
+    name: a.name,
+    role: a.role || "assistant",
+    modelId: a.model_id || null,
+    providerId: a.model?.provider_id || null,
+    modelLabel: a.model?.remote_id || a.model_name || "—",
+    temperature: a.temperature ?? 0.7,
+    prompt: a.system_prompt || "",
+    icon: Icon,
+    status: "active",
+    skillIds: a.skills?.map((s) => s.id) ?? [],
+  }
+}
 
 interface SkillOption {
   id: string
   name: string
-  icon: React.ElementType
+  icon: React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>
 }
 
-const availableSkills: SkillOption[] = [
-  { id: "websearch", name: "WebSearch", icon: Globe },
-  { id: "code-interpreter", name: "CodeInterpreter", icon: Terminal },
-  { id: "file-reader", name: "FileReader", icon: FileCodeIcon },
-  { id: "json-parser", name: "JSONParser", icon: Braces },
-  { id: "semantic-search", name: "SemanticSearch", icon: Search },
-]
-
-interface Agent {
-  id: string
-  name: string
-  role: string
-  model: string
-  temperature: number
-  prompt: string
-  icon: React.ElementType
-  status: "active" | "idle"
+const BUILTIN_SKILL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  websearch: Globe,
+  "code-interpreter": Terminal,
+  "file-reader": FileCodeIcon,
+  "json-parser": Braces,
+  "semantic-search": Search,
 }
 
-const agents: Agent[] = [
-  {
-    id: "1",
-    name: "Router Agent",
-    role: "Orchestrator",
-    model: "gpt-4o",
-    temperature: 0.1,
-    prompt: "You are the Router agent. Analyze user queries and delegate to the appropriate specialized agent.",
-    icon: Bot,
-    status: "active",
-  },
-  {
-    id: "2",
-    name: "Coder Agent",
-    role: "Code Generation",
-    model: "gpt-4o",
-    temperature: 0.2,
-    prompt: "You are a senior software engineer. Write clean, efficient code with proper error handling.",
-    icon: Code2,
-    status: "active",
-  },
-  {
-    id: "3",
-    name: "Reviewer Agent",
-    role: "Code Review",
-    model: "gpt-4o-mini",
-    temperature: 0.3,
-    prompt: "You review code for bugs, security issues, and best practices. Be thorough but concise.",
-    icon: Eye,
-    status: "idle",
-  },
-  {
-    id: "4",
-    name: "Search Agent",
-    role: "Information Retrieval",
-    model: "gpt-4o-mini",
-    temperature: 0.0,
-    prompt: "Search the codebase and documentation to find relevant information for the team.",
-    icon: SearchIcon,
-    status: "active",
-  },
-  {
-    id: "5",
-    name: "Summary Agent",
-    role: "Summarization",
-    model: "gpt-4o-mini",
-    temperature: 0.5,
-    prompt: "Synthesize findings from other agents into a clear, actionable summary for the user.",
-    icon: FileText,
-    status: "idle",
-  },
-]
-
-function AgentList({ onSelectAgent }: { onSelectAgent: (agent: Agent) => void }) {
+function AgentList({
+  agents,
+  onSelectAgent,
+  onAddAgent,
+  canAdd,
+}: {
+  agents: AgentDisplay[]
+  onSelectAgent: (agent: AgentDisplay) => void
+  onAddAgent: () => void
+  canAdd: boolean
+}) {
   return (
     <div className="flex flex-col">
-      <div className="px-4 pb-3">
-        <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Agent Team</h2>
+      <div className="flex items-center justify-between px-4 pb-3">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          Agent Team
+        </h2>
+        {canAdd && (
+          <button
+            onClick={onAddAgent}
+            className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Add agent to session"
+          >
+            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        )}
       </div>
       <ul className="flex flex-col" role="list" aria-label="Agent team">
-        {agents.map((agent) => (
-          <li key={agent.id}>
-            <button
-              onClick={() => onSelectAgent(agent)}
-              className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/70"
-            >
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted">
-                <agent.icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-foreground truncate">{agent.name}</span>
-                  <span
-                    className={cn(
-                      "h-1.5 w-1.5 rounded-full shrink-0",
-                      agent.status === "active" ? "bg-emerald-500" : "bg-border"
-                    )}
-                    aria-label={agent.status === "active" ? "Active" : "Idle"}
-                  />
+        {agents.map((agent) => {
+          const Icon = agent.icon
+          return (
+            <li key={agent.id}>
+              <button
+                onClick={() => onSelectAgent(agent)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/70"
+              >
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted">
+                  <Icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                 </div>
-                <span className="text-xs text-muted-foreground">{agent.role}</span>
-              </div>
-            </button>
-          </li>
-        ))}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-foreground truncate">{agent.name}</span>
+                    <span
+                      className={cn(
+                        "h-1.5 w-1.5 rounded-full shrink-0",
+                        agent.status === "active" ? "bg-emerald-500" : "bg-border"
+                      )}
+                      aria-label={agent.status === "active" ? "Active" : "Idle"}
+                    />
+                  </div>
+                  <span className="text-xs text-muted-foreground">{agent.role}</span>
+                </div>
+              </button>
+            </li>
+          )
+        })}
       </ul>
+      {agents.length === 0 && canAdd && (
+        <p className="px-4 py-3 text-xs text-muted-foreground">No agents in this session. Click + to add.</p>
+      )}
     </div>
   )
 }
 
-function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
-  const [model, setModel] = useState(agent.model)
+function AddAgentDialog({
+  isOpen,
+  onClose,
+  agents,
+  onSelect,
+}: {
+  isOpen: boolean
+  onClose: () => void
+  agents: AgentDisplay[]
+  onSelect: (agent: AgentDisplay) => void
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    if (isOpen) dialog.showModal()
+    else dialog.close()
+  }, [isOpen])
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const handleClose = () => onClose()
+    dialog.addEventListener("close", handleClose)
+    return () => dialog.removeEventListener("close", handleClose)
+  }, [onClose])
+
+  if (!isOpen) return null
+  return (
+    <dialog
+      ref={dialogRef}
+      className="fixed inset-0 z-50 m-auto h-auto max-h-[80vh] w-full max-w-md rounded-xl border border-border bg-background p-0 backdrop:bg-black/50"
+      aria-label="Add agent to session"
+    >
+      <div className="flex flex-col">
+        <div className="flex items-center justify-between border-b border-border px-6 py-4">
+          <h2 className="text-sm font-semibold text-foreground">Add Agent to Session</h2>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          {agents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No agents in market. Create one in Agent Market first.</p>
+          ) : (
+            <ul className="flex flex-col gap-0.5">
+              {agents.map((agent) => {
+                const Icon = agent.icon
+                return (
+                  <li key={agent.id}>
+                    <button
+                      onClick={() => onSelect(agent)}
+                      className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-muted"
+                    >
+                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                        <Icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-sm font-medium text-foreground">{agent.name}</span>
+                        <span className="ml-2 text-xs text-muted-foreground">{agent.role}</span>
+                      </div>
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </div>
+      </div>
+    </dialog>
+  )
+}
+
+function AgentConfig({
+  agent,
+  skills,
+  providers,
+  llms,
+  onBack,
+  onSave,
+}: {
+  agent: AgentDisplay
+  skills: SkillOption[]
+  providers: Provider[]
+  llms: LLM[]
+  onBack: () => void
+  onSave: (updates: Partial<AgentDisplay>) => Promise<void>
+}) {
+  const [providerId, setProviderId] = useState(agent.providerId || "")
+  const [modelId, setModelId] = useState(agent.modelId || "")
   const [temperature, setTemperature] = useState(agent.temperature)
   const [prompt, setPrompt] = useState(agent.prompt)
-  const [equippedSkills, setEquippedSkills] = useState<Set<string>>(
-    new Set(["websearch", "code-interpreter"])
-  )
+  const [equippedSkills, setEquippedSkills] = useState<Set<string>>(new Set(agent.skillIds))
+  const [saving, setSaving] = useState(false)
+
+  const providerLlms = llms.filter((l) => l.provider_id === providerId)
 
   const toggleSkill = (skillId: string) => {
     setEquippedSkills((prev) => {
       const next = new Set(prev)
-      if (next.has(skillId)) {
-        next.delete(skillId)
-      } else {
-        next.add(skillId)
-      }
+      if (next.has(skillId)) next.delete(skillId)
+      else next.add(skillId)
       return next
     })
   }
 
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onSave({
+        modelId: modelId || null,
+        providerId: providerId || null,
+        temperature,
+        prompt,
+        skillIds: Array.from(equippedSkills),
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const Icon = agent.icon
   return (
     <div className="flex flex-col">
       <button
@@ -150,7 +281,7 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
       </button>
       <div className="flex items-center gap-3 px-4 pb-5">
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted">
-          <agent.icon className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
+          <Icon className="h-4.5 w-4.5 text-muted-foreground" aria-hidden="true" />
         </div>
         <div>
           <h3 className="text-sm font-semibold text-foreground">{agent.name}</h3>
@@ -160,23 +291,52 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
 
       <div className="flex flex-col gap-5 px-4">
         <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-foreground" htmlFor="model-select">Model</label>
+          <label className="text-xs font-medium text-foreground" htmlFor="provider-select">
+            Provider
+          </label>
           <select
-            id="model-select"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
+            id="provider-select"
+            value={providerId}
+            onChange={(e) => {
+              setProviderId(e.target.value)
+              setModelId("")
+            }}
             className="h-8 rounded-md border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
           >
-            <option value="gpt-4o">gpt-4o</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-            <option value="claude-3.5-sonnet">claude-3.5-sonnet</option>
-            <option value="claude-3-haiku">claude-3-haiku</option>
+            <option value="">Select provider</option>
+            {providers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-medium text-foreground" htmlFor="model-select">
+            LLM Model
+          </label>
+          <select
+            id="model-select"
+            value={modelId}
+            onChange={(e) => setModelId(e.target.value)}
+            disabled={!providerId}
+            className="h-8 rounded-md border border-border bg-card px-2.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          >
+            <option value="">Select model</option>
+            {providerLlms.map((llm) => (
+              <option key={llm.id} value={llm.id}>
+                {llm.remote_id}
+              </option>
+            ))}
           </select>
         </div>
 
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center justify-between">
-            <label className="text-xs font-medium text-foreground" htmlFor="temp-range">Temperature</label>
+            <label className="text-xs font-medium text-foreground" htmlFor="temp-range">
+              Temperature
+            </label>
             <span className="text-xs font-mono text-muted-foreground">{temperature.toFixed(1)}</span>
           </div>
           <input
@@ -196,7 +356,9 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-foreground" htmlFor="system-prompt">System Prompt</label>
+          <label className="text-xs font-medium text-foreground" htmlFor="system-prompt">
+            System Prompt
+          </label>
           <textarea
             id="system-prompt"
             value={prompt}
@@ -209,7 +371,7 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
         <div className="flex flex-col gap-2">
           <label className="text-xs font-medium text-foreground">Equipped Skills</label>
           <div className="flex flex-col gap-0.5 rounded-md border border-border bg-card overflow-hidden">
-            {availableSkills.map((skill) => {
+            {skills.map((skill) => {
               const isEquipped = equippedSkills.has(skill.id)
               const SkillIcon = skill.icon
               return (
@@ -224,9 +386,7 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
                   <div
                     className={cn(
                       "flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors",
-                      isEquipped
-                        ? "border-primary bg-primary"
-                        : "border-border bg-background"
+                      isEquipped ? "border-primary bg-primary" : "border-border bg-background"
                     )}
                   >
                     {isEquipped && (
@@ -246,19 +406,8 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
                       </svg>
                     )}
                   </div>
-                  <SkillIcon
-                    className={cn(
-                      "h-3.5 w-3.5",
-                      isEquipped ? "text-primary" : "text-muted-foreground"
-                    )}
-                    aria-hidden="true"
-                  />
-                  <span
-                    className={cn(
-                      "text-xs font-medium",
-                      isEquipped ? "text-foreground" : "text-muted-foreground"
-                    )}
-                  >
+                  <SkillIcon className={cn("h-3.5 w-3.5", isEquipped ? "text-primary" : "text-muted-foreground")} />
+                  <span className={cn("text-xs font-medium", isEquipped ? "text-foreground" : "text-muted-foreground")}>
                     {skill.name}
                   </span>
                 </button>
@@ -266,23 +415,151 @@ function AgentConfig({ agent, onBack }: { agent: Agent; onBack: () => void }) {
             })}
           </div>
           <span className="text-[10px] text-muted-foreground">
-            {equippedSkills.size} of {availableSkills.length} skills equipped
+            {equippedSkills.size} of {skills.length} skills equipped
           </span>
         </div>
+
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="h-8 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+        >
+          {saving ? "Saving..." : "Save Changes"}
+        </button>
       </div>
     </div>
   )
 }
 
-export function AgentSidebar() {
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null)
+interface AgentSidebarProps {
+  sessionId?: string | null
+}
+
+export function AgentSidebar({ sessionId }: AgentSidebarProps) {
+  const [allAgents, setAllAgents] = useState<AgentDisplay[]>([])
+  const [sessionAgents, setSessionAgents] = useState<AgentDisplay[]>([])
+  const [skills, setSkills] = useState<SkillOption[]>([])
+  const [providers, setProviders] = useState<Provider[]>([])
+  const [llms, setLlms] = useState<LLM[]>([])
+  const [loading, setLoading] = useState(true)
+  const [selectedAgent, setSelectedAgent] = useState<AgentDisplay | null>(null)
+  const [addDialogOpen, setAddDialogOpen] = useState(false)
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [agentsRes, skillsRes, providersRes, llmsRes] = await Promise.all([
+        api.get<ApiAgent[]>("/api/agents"),
+        api.get<ApiSkill[]>("/api/skills"),
+        api.get<Provider[]>("/api/providers"),
+        api.get<LLM[]>("/api/llms"),
+      ])
+      const agentsMap = new Map(agentsRes.map((a) => [a.id, toDisplayAgent(a)]))
+      setAllAgents(Array.from(agentsMap.values()))
+      setProviders(providersRes)
+      setLlms(llmsRes)
+      setSkills(
+        skillsRes.map((s) => ({
+          id: s.id,
+          name: s.name,
+          icon: BUILTIN_SKILL_ICONS[s.name.toLowerCase().replace(/\s+/g, "-")] || Wrench,
+        }))
+      )
+
+      if (sessionId) {
+        const sessAgents = await api.get<SessionAgent[]>(`/api/sessions/${sessionId}/agents`)
+        const resolved = sessAgents
+          .map((sa) => agentsMap.get(sa.original_agent_id))
+          .filter((a): a is AgentDisplay => a != null)
+        setSessionAgents(resolved)
+      } else {
+        setSessionAgents([])
+      }
+    } catch {
+      setAllAgents([])
+      setSessionAgents([])
+      setSkills([])
+      setProviders([])
+      setLlms([])
+    } finally {
+      setLoading(false)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    fetchData()
+  }, [fetchData])
+
+  const handleAddAgent = async (agent: AgentDisplay) => {
+    if (!sessionId) return
+    try {
+      await api.post(`/api/sessions/${sessionId}/agents`, {
+        original_agent_id: agent.id,
+      })
+      setAddDialogOpen(false)
+      fetchData()
+    } catch {
+      // could show toast
+    }
+  }
+
+  const handleSave = async (updates: Partial<AgentDisplay>) => {
+    if (!selectedAgent) return
+    await api.put(`/api/agents/${selectedAgent.id}`, {
+      name: selectedAgent.name,
+      role: selectedAgent.role,
+      model_id: updates.modelId ?? selectedAgent.modelId,
+      temperature: updates.temperature ?? selectedAgent.temperature,
+      system_prompt: updates.prompt ?? selectedAgent.prompt,
+      skill_ids: updates.skillIds ?? selectedAgent.skillIds,
+    })
+    setAllAgents((prev) =>
+      prev.map((a) => (a.id === selectedAgent.id ? { ...a, ...updates } : a))
+    )
+    setSessionAgents((prev) =>
+      prev.map((a) => (a.id === selectedAgent.id ? { ...a, ...updates } : a))
+    )
+    setSelectedAgent((prev) => (prev ? { ...prev, ...updates } : null))
+  }
+
+  const displayAgents = sessionId ? sessionAgents : allAgents
+  const canAdd = Boolean(sessionId)
+
+  if (loading) {
+    return (
+      <aside className="flex w-[280px] flex-col border-l border-border bg-background pt-4" aria-label="Agent panel">
+        <div className="flex flex-1 items-center justify-center p-4">
+          <span className="text-xs text-muted-foreground">Loading agents...</span>
+        </div>
+      </aside>
+    )
+  }
 
   return (
     <aside className="flex w-[280px] flex-col border-l border-border bg-background pt-4" aria-label="Agent panel">
       {selectedAgent ? (
-        <AgentConfig agent={selectedAgent} onBack={() => setSelectedAgent(null)} />
+        <AgentConfig
+          agent={selectedAgent}
+          skills={skills}
+          providers={providers}
+          llms={llms}
+          onBack={() => setSelectedAgent(null)}
+          onSave={handleSave}
+        />
       ) : (
-        <AgentList onSelectAgent={setSelectedAgent} />
+        <>
+          <AgentList
+            agents={displayAgents}
+            onSelectAgent={setSelectedAgent}
+            onAddAgent={() => setAddDialogOpen(true)}
+            canAdd={canAdd}
+          />
+          <AddAgentDialog
+            isOpen={addDialogOpen}
+            onClose={() => setAddDialogOpen(false)}
+            agents={allAgents.filter((a) => !sessionAgents.some((sa) => sa.id === a.id))}
+            onSelect={handleAddAgent}
+          />
+        </>
       )}
     </aside>
   )

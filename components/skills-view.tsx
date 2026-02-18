@@ -1,68 +1,55 @@
 "use client"
 
-import { useState } from "react"
-import { Plus, ArrowLeft, Globe, Terminal, FileCode, Braces, Search, Wrench, X, ChevronRight } from "lucide-react"
+import { useState, useEffect, useCallback } from "react"
+import {
+  Plus,
+  ArrowLeft,
+  Globe,
+  Terminal,
+  FileCode,
+  Braces,
+  Search,
+  Wrench,
+  X,
+} from "lucide-react"
 import { cn } from "@/lib/utils"
-import { globalTools } from "@/components/tools-view"
+import { api, type Skill as ApiSkill } from "@/lib/api"
 
-export interface Skill {
+const SKILL_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
+  websearch: Globe,
+  "code-interpreter": Terminal,
+  "file-reader": FileCode,
+  "json-parser": Braces,
+  "semantic-search": Search,
+}
+
+interface SkillDisplay {
   id: string
   name: string
   description: string
   code: string
-  icon: React.ElementType
+  icon: React.ComponentType<{ className?: string }>
   builtIn: boolean
 }
 
-export const globalSkills: Skill[] = [
-  {
-    id: "websearch",
-    name: "WebSearch",
-    description: "Search the web for real-time information and return structured results.",
-    code: `async function webSearch(query: string): Promise<SearchResult[]> {\n  const response = await fetch(\`/api/search?q=\${encodeURIComponent(query)}\`);\n  return response.json();\n}`,
-    icon: Globe,
-    builtIn: true,
-  },
-  {
-    id: "code-interpreter",
-    name: "CodeInterpreter",
-    description: "Execute code in a sandboxed environment and return stdout/stderr.",
-    code: `async function codeInterpreter(code: string, lang: string): Promise<ExecResult> {\n  const response = await fetch('/api/execute', {\n    method: 'POST',\n    body: JSON.stringify({ code, lang }),\n  });\n  return response.json();\n}`,
-    icon: Terminal,
-    builtIn: true,
-  },
-  {
-    id: "file-reader",
-    name: "FileReader",
-    description: "Read file contents from the project workspace by path.",
-    code: `async function fileReader(path: string): Promise<FileContent> {\n  const response = await fetch(\`/api/files?path=\${encodeURIComponent(path)}\`);\n  return response.json();\n}`,
-    icon: FileCode,
-    builtIn: true,
-  },
-  {
-    id: "json-parser",
-    name: "JSONParser",
-    description: "Parse, validate, and transform JSON data with schema validation.",
-    code: `function jsonParser(input: string, schema?: JSONSchema): ParseResult {\n  const parsed = JSON.parse(input);\n  if (schema) validate(parsed, schema);\n  return { data: parsed, valid: true };\n}`,
-    icon: Braces,
-    builtIn: true,
-  },
-  {
-    id: "semantic-search",
-    name: "SemanticSearch",
-    description: "Vector similarity search across embedded documents and code.",
-    code: `async function semanticSearch(query: string, topK: number = 5): Promise<Match[]> {\n  const embedding = await embed(query);\n  return vectorDB.query(embedding, topK);\n}`,
-    icon: Search,
-    builtIn: true,
-  },
-]
+function toDisplay(s: ApiSkill): SkillDisplay {
+  const baseId = s.name.toLowerCase().replace(/\s+/g, "-")
+  return {
+    id: s.id,
+    name: s.name,
+    description: s.description ?? "",
+    code: s.code ?? s.prompt ?? "",
+    icon: SKILL_ICONS[baseId] ?? Wrench,
+    builtIn: false,
+  }
+}
 
 function SkillCard({
   skill,
   onSelect,
 }: {
-  skill: Skill
-  onSelect: (skill: Skill) => void
+  skill: SkillDisplay
+  onSelect: (skill: SkillDisplay) => void
 }) {
   const Icon = skill.icon
   return (
@@ -83,17 +70,35 @@ function SkillCard({
           )}
         </div>
         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground line-clamp-2">
-          {skill.description}
+          {skill.description || "No description"}
         </p>
       </div>
     </button>
   )
 }
 
-function SkillDetail({ skill, onBack }: { skill: Skill; onBack: () => void }) {
+function SkillDetail({
+  skill,
+  onBack,
+  onSave,
+}: {
+  skill: SkillDisplay
+  onBack: () => void
+  onSave: (updates: Partial<SkillDisplay>) => Promise<void>
+}) {
   const [code, setCode] = useState(skill.code)
   const [description, setDescription] = useState(skill.description)
+  const [saving, setSaving] = useState(false)
   const Icon = skill.icon
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onSave({ code, description })
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div className="flex flex-1 flex-col">
@@ -146,8 +151,12 @@ function SkillDetail({ skill, onBack }: { skill: Skill; onBack: () => void }) {
           </div>
 
           <div className="flex gap-2">
-            <button className="h-8 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90">
-              Save Changes
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="h-8 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            >
+              {saving ? "Saving..." : "Save Changes"}
             </button>
             <button
               onClick={onBack}
@@ -162,22 +171,32 @@ function SkillDetail({ skill, onBack }: { skill: Skill; onBack: () => void }) {
   )
 }
 
-function CreateSkillForm({ onClose, onCreated }: { onClose: () => void; onCreated: (skill: Skill) => void }) {
+function CreateSkillForm({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void
+  onCreated: (skill: SkillDisplay) => void
+}) {
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [code, setCode] = useState("")
+  const [creating, setCreating] = useState(false)
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!name.trim()) return
-    const newSkill: Skill = {
-      id: name.toLowerCase().replace(/\s+/g, "-"),
-      name,
-      description,
-      code,
-      icon: Wrench,
-      builtIn: false,
+    setCreating(true)
+    try {
+      const created = await api.post<ApiSkill>("/api/skills", {
+        name,
+        description,
+        code,
+        tool_ids: [],
+      })
+      onCreated(toDisplay(created))
+    } finally {
+      setCreating(false)
     }
-    onCreated(newSkill)
   }
 
   return (
@@ -241,10 +260,10 @@ function CreateSkillForm({ onClose, onCreated }: { onClose: () => void; onCreate
           <div className="flex gap-2">
             <button
               onClick={handleCreate}
-              disabled={!name.trim()}
+              disabled={creating || !name.trim()}
               className="h-8 rounded-md bg-primary px-4 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
             >
-              Create Skill
+              {creating ? "Creating..." : "Create Skill"}
             </button>
             <button
               onClick={onClose}
@@ -260,9 +279,47 @@ function CreateSkillForm({ onClose, onCreated }: { onClose: () => void; onCreate
 }
 
 export function SkillsView() {
-  const [skills, setSkills] = useState<Skill[]>(globalSkills)
-  const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null)
+  const [skills, setSkills] = useState<SkillDisplay[]>([])
+  const [loading, setLoading] = useState(true)
+  const [selectedSkill, setSelectedSkill] = useState<SkillDisplay | null>(null)
   const [creating, setCreating] = useState(false)
+
+  const fetchSkills = useCallback(async () => {
+    try {
+      const data = await api.get<ApiSkill[]>("/api/skills")
+      setSkills(data.map(toDisplay))
+    } catch {
+      setSkills([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchSkills()
+  }, [fetchSkills])
+
+  const handleSave = async (updates: Partial<SkillDisplay>) => {
+    if (!selectedSkill) return
+    await api.put(`/api/skills/${selectedSkill.id}`, {
+      name: selectedSkill.name,
+      description: updates.description ?? selectedSkill.description,
+      code: updates.code ?? selectedSkill.code,
+      tool_ids: [],
+    })
+    setSkills((prev) =>
+      prev.map((s) => (s.id === selectedSkill.id ? { ...s, ...updates } : s))
+    )
+    setSelectedSkill((prev) => (prev ? { ...prev, ...updates } : null))
+  }
+
+  if (loading) {
+    return (
+      <section className="flex flex-1 flex-col items-center justify-center bg-background">
+        <span className="text-sm text-muted-foreground">Loading skills...</span>
+      </section>
+    )
+  }
 
   if (creating) {
     return (
@@ -270,7 +327,7 @@ export function SkillsView() {
         <CreateSkillForm
           onClose={() => setCreating(false)}
           onCreated={(skill) => {
-            setSkills((prev) => [...prev, skill])
+            setSkills((prev) => [skill, ...prev])
             setCreating(false)
             setSelectedSkill(skill)
           }}
@@ -282,7 +339,11 @@ export function SkillsView() {
   if (selectedSkill) {
     return (
       <section className="flex flex-1 flex-col bg-background" aria-label="Skill Detail">
-        <SkillDetail skill={selectedSkill} onBack={() => setSelectedSkill(null)} />
+        <SkillDetail
+          skill={selectedSkill}
+          onBack={() => setSelectedSkill(null)}
+          onSave={handleSave}
+        />
       </section>
     )
   }
@@ -308,6 +369,9 @@ export function SkillsView() {
           {skills.map((skill) => (
             <SkillCard key={skill.id} skill={skill} onSelect={setSelectedSkill} />
           ))}
+          {skills.length === 0 && (
+            <p className="text-sm text-muted-foreground">No skills yet. Create one to get started.</p>
+          )}
         </div>
       </div>
     </section>

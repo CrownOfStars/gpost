@@ -1,10 +1,11 @@
 "use client"
 
-import { useState } from "react"
-import { Eye, EyeOff, CheckCircle2, AlertCircle, Plus, Trash2 } from "lucide-react"
+import { useState, useEffect, useCallback } from "react"
+import { Eye, EyeOff, CheckCircle2, AlertCircle, Plus, Trash2, RefreshCw } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { api, type Provider, type LLM } from "@/lib/api"
 
-interface Provider {
+interface ProviderDisplay {
   id: string
   name: string
   shortName: string
@@ -13,65 +14,66 @@ interface Provider {
   verified: boolean | null
 }
 
-const initialProviders: Provider[] = [
-  {
-    id: "openai",
-    name: "OpenAI",
-    shortName: "OAI",
-    apiKey: "sk-proj-****************************a4Qz",
-    baseUrl: "https://api.openai.com/v1",
-    verified: true,
-  },
-  {
-    id: "anthropic",
-    name: "Anthropic",
-    shortName: "ANT",
-    apiKey: "sk-ant-****************************vX8m",
-    baseUrl: "https://api.anthropic.com",
-    verified: true,
-  },
-  {
-    id: "gemini",
-    name: "Google Gemini",
-    shortName: "GEM",
-    apiKey: "",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-    verified: null,
-  },
-  {
-    id: "groq",
-    name: "Groq",
-    shortName: "GRQ",
-    apiKey: "",
-    baseUrl: "https://api.groq.com/openai/v1",
-    verified: null,
-  },
-]
+function toDisplay(p: Provider): ProviderDisplay {
+  const shortName = p.name.length >= 3 ? p.name.slice(0, 3).toUpperCase() : p.name.toUpperCase()
+  return {
+    id: p.id,
+    name: p.name,
+    shortName,
+    apiKey: p.api_key ?? "",
+    baseUrl: p.base_url ?? "",
+    verified: p.api_key ? true : null,
+  }
+}
 
 function ProviderCard({
   provider,
   onUpdate,
   onDelete,
 }: {
-  provider: Provider
-  onUpdate: (id: string, updates: Partial<Provider>) => void
-  onDelete: (id: string) => void
+  provider: ProviderDisplay
+  onUpdate: (id: string, apiKey: string, baseUrl: string) => Promise<void>
+  onDelete: (id: string) => Promise<void>
 }) {
   const [showKey, setShowKey] = useState(false)
   const [localKey, setLocalKey] = useState(provider.apiKey)
   const [localUrl, setLocalUrl] = useState(provider.baseUrl)
   const [verifying, setVerifying] = useState(false)
+  const [llms, setLlms] = useState<LLM[]>([])
+  const [refreshing, setRefreshing] = useState(false)
 
-  const handleVerify = () => {
+  const fetchLlms = useCallback(async () => {
+    try {
+      const data = await api.get<LLM[]>(`/api/providers/${provider.id}/models`)
+      setLlms(data)
+    } catch {
+      setLlms([])
+    }
+  }, [provider.id])
+
+  useEffect(() => {
+    fetchLlms()
+  }, [fetchLlms])
+
+  const handleVerify = async () => {
     setVerifying(true)
-    setTimeout(() => {
-      onUpdate(provider.id, {
-        apiKey: localKey,
-        baseUrl: localUrl,
-        verified: localKey.length > 0,
-      })
+    try {
+      await onUpdate(provider.id, localKey, localUrl)
+    } finally {
       setVerifying(false)
-    }, 800)
+    }
+  }
+
+  const handleRefreshLlms = async () => {
+    setRefreshing(true)
+    try {
+      await api.post(`/api/providers/${provider.id}/models/refresh`, {})
+      await fetchLlms()
+    } catch {
+      setLlms([])
+    } finally {
+      setRefreshing(false)
+    }
   }
 
   return (
@@ -161,45 +163,105 @@ function ProviderCard({
           >
             {verifying ? "Verifying..." : "Save & Verify"}
           </button>
+          <button
+            onClick={handleRefreshLlms}
+            disabled={refreshing || !localKey.trim()}
+            className={cn(
+              "flex h-7 items-center gap-1.5 rounded-md px-3 text-xs font-medium transition-colors",
+              "border border-border bg-background hover:bg-muted disabled:opacity-50"
+            )}
+          >
+            <RefreshCw className={cn("h-3 w-3", refreshing && "animate-spin")} aria-hidden="true" />
+            {refreshing ? "Refreshing..." : "Refresh LLM List"}
+          </button>
         </div>
+
+        {llms.length > 0 && (
+          <div className="flex flex-col gap-1.5 pt-2 border-t border-border">
+            <label className="text-xs font-medium text-foreground">LLM Models ({llms.length})</label>
+            <select
+              className="h-8 rounded-md border border-border bg-background px-3 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              defaultValue=""
+              aria-label="LLM model list"
+            >
+              <option value="" disabled>
+                Select a model
+              </option>
+              {llms.map((llm) => (
+                <option key={llm.id} value={llm.id}>
+                  {llm.remote_id}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
 export function ApiKeysView() {
-  const [providers, setProviders] = useState(initialProviders)
+  const [providers, setProviders] = useState<ProviderDisplay[]>([])
+  const [loading, setLoading] = useState(true)
   const [showAddForm, setShowAddForm] = useState(false)
   const [newName, setNewName] = useState("")
   const [newShort, setNewShort] = useState("")
 
-  const handleUpdate = (id: string, updates: Partial<Provider>) => {
+  const fetchProviders = useCallback(async () => {
+    try {
+      const data = await api.get<Provider[]>("/api/providers")
+      setProviders(data.map(toDisplay))
+    } catch {
+      setProviders([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchProviders()
+  }, [fetchProviders])
+
+  const handleUpdate = async (id: string, apiKey: string, baseUrl: string) => {
+    const p = providers.find((x) => x.id === id)
+    await api.put(`/api/providers/${id}`, {
+      name: p?.name ?? "",
+      base_url: baseUrl,
+      api_key: apiKey,
+      is_active: true,
+    })
     setProviders((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, ...updates } : p))
+      prev.map((p) =>
+        p.id === id ? { ...p, apiKey, baseUrl, verified: apiKey.length > 0 } : p
+      )
     )
   }
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
+    await api.delete(`/api/providers/${id}`)
     setProviders((prev) => prev.filter((p) => p.id !== id))
   }
 
-  const handleAddProvider = () => {
+  const handleAddProvider = async () => {
     if (!newName.trim()) return
-    const id = newName.toLowerCase().replace(/\s+/g, "-")
-    setProviders((prev) => [
-      ...prev,
-      {
-        id,
-        name: newName,
-        shortName: newShort || newName.slice(0, 3).toUpperCase(),
-        apiKey: "",
-        baseUrl: "",
-        verified: null,
-      },
-    ])
+    const created = await api.post<Provider>("/api/providers", {
+      name: newName,
+      base_url: "",
+      api_key: "",
+      is_active: true,
+    })
+    setProviders((prev) => [toDisplay(created), ...prev])
     setNewName("")
     setNewShort("")
     setShowAddForm(false)
+  }
+
+  if (loading) {
+    return (
+      <section className="flex flex-1 flex-col items-center justify-center bg-background">
+        <span className="text-sm text-muted-foreground">Loading providers...</span>
+      </section>
+    )
   }
 
   return (
@@ -207,7 +269,7 @@ export function ApiKeysView() {
       <header className="flex h-14 items-center justify-between border-b border-border px-6">
         <div>
           <h1 className="text-sm font-semibold text-foreground">API Key Management</h1>
-          <p className="text-xs text-muted-foreground">Configure LLM provider credentials</p>
+          <p className="text-xs text-muted-foreground">Configure LLM provider credentials & refresh model list</p>
         </div>
         <button
           onClick={() => setShowAddForm(!showAddForm)}
@@ -284,6 +346,9 @@ export function ApiKeysView() {
               onDelete={handleDelete}
             />
           ))}
+          {providers.length === 0 && !showAddForm && (
+            <p className="text-sm text-muted-foreground">No providers. Click Add Provider to create one.</p>
+          )}
         </div>
       </div>
     </section>

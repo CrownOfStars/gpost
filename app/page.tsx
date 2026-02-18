@@ -9,10 +9,12 @@ import { TopologyModal } from "@/components/topology-modal"
 import { ApiKeysView } from "@/components/api-keys-view"
 import { SkillsView } from "@/components/skills-view"
 import { ToolsView } from "@/components/tools-view"
+import { AgentMarketView } from "@/components/agent-market-view"
 
 export default function Page() {
   const [activeTab, setActiveTab] = useState("chat")
-  const [activeSessionId, setActiveSessionId] = useState("1")
+  const [activeSessionId, setActiveSessionId] = useState("")
+  const [activeSessionTitle, setActiveSessionTitle] = useState<string | undefined>()
   const [topologyOpen, setTopologyOpen] = useState(false)
 
   const handleOpenTopology = useCallback(() => setTopologyOpen(true), [])
@@ -25,16 +27,34 @@ export default function Page() {
     <div className="flex h-screen overflow-hidden">
       <NavSidebar activeTab={activeTab} onTabChange={setActiveTab} />
       {showSessionList && (
-        <SessionList activeSessionId={activeSessionId} onSessionSelect={setActiveSessionId} />
+        <SessionList
+          activeSessionId={activeSessionId}
+          onSessionSelect={(id, title) => {
+            setActiveSessionId(id)
+            setActiveSessionTitle(title)
+          }}
+        />
       )}
 
-      {activeTab === "chat" && <ChatArea onViewTopology={handleOpenTopology} />}
+      {activeTab === "chat" && (
+        <ChatArea
+          sessionId={activeSessionId}
+          sessionTitle={activeSessionTitle}
+          onViewTopology={handleOpenTopology}
+        />
+      )}
       {activeTab === "apikeys" && <ApiKeysView />}
       {activeTab === "skills" && <SkillsView />}
       {activeTab === "tools" && <ToolsView />}
+      {activeTab === "market" && <AgentMarketView />}
 
-      {showAgentSidebar && <AgentSidebar />}
-      <TopologyModal isOpen={topologyOpen} onClose={handleCloseTopology} />
+      {showAgentSidebar && <AgentSidebar sessionId={activeSessionId} />}
+      <TopologyModal
+        isOpen={topologyOpen}
+        onClose={handleCloseTopology}
+        sessionId={activeSessionId}
+        sessionTitle={activeSessionTitle}
+      />
     </div>
   )
 }
