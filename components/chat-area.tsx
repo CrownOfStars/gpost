@@ -15,12 +15,21 @@ interface DisplayMessage {
   thoughtContent?: string
 }
 
+interface StreamBlock {
+  type: "thought" | "agent" | "handoff"
+  thoughtContent?: string
+  agentName?: string
+  content: string
+}
+
 function thoughtContentFromMessage(m: Message): string | undefined {
   const tp = m.thought_process
   if (!tp) return undefined
   if (typeof tp === "string") return tp
   if (Array.isArray(tp)) {
-    const parts = tp.map((p: unknown) => (p && typeof p === "object" && "text" in p) ? String((p as { text: string }).text) : String(p))
+    const parts = tp.map((p: unknown) =>
+      p && typeof p === "object" && "text" in p ? String((p as { text: string }).text) : String(p)
+    )
     return parts.join("\n")
   }
   return undefined
@@ -91,7 +100,9 @@ function AgentMessage({ content, agentName }: { content: string; agentName?: str
           <span className="mb-1 block text-xs font-medium text-muted-foreground">{agentName}</span>
         )}
         <div className="rounded-2xl rounded-bl-sm bg-chat-agent border border-border px-4 py-2.5">
-          <p className="text-sm leading-relaxed text-chat-agent-foreground whitespace-pre-wrap">{content}</p>
+          <p className="text-sm leading-relaxed text-chat-agent-foreground whitespace-pre-wrap">
+            {content}
+          </p>
         </div>
       </div>
     </div>
@@ -120,6 +131,8 @@ export function ChatArea({ sessionId, sessionTitle, onViewTopology }: ChatAreaPr
   const [loading, setLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [streamBlocks, setStreamBlocks] = useState<StreamBlock[]>([])
+  const [pendingUserMsg, setPendingUserMsg] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const fetchSession = useCallback(async () => {
@@ -146,7 +159,7 @@ export function ChatArea({ sessionId, sessionTitle, onViewTopology }: ChatAreaPr
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [session?.messages])
+  }, [session?.messages, streamBlocks])
 
   const handleSend = async () => {
     const msg = inputValue.trim()
@@ -154,10 +167,97 @@ export function ChatArea({ sessionId, sessionTitle, onViewTopology }: ChatAreaPr
     try {
       setSending(true)
       setInputValue("")
-      await api.post("/api/chat/send", { session_id: sessionId, message: msg })
+      setError(null)
+      setPendingUserMsg(msg)
+      setStreamBlocks([])
+
+      const res = await api.chatStream(sessionId, msg)
+      if (!res.ok) {
+        const err = await res.text()
+        throw new Error(err)
+      }
+
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+      let currentEvent = ""
+      let thoughtContent = ""
+      let agentBlocks: StreamBlock[] = []
+      let currentBlock: StreamBlock | null = null
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n\n")
+          buffer = lines.pop() || ""
+
+          for (const chunk of lines) {
+            let eventType = ""
+            let dataStr = ""
+            for (const line of chunk.split("\n")) {
+              if (line.startsWith("event: ")) eventType = line.slice(7).trim()
+              if (line.startsWith("data: ")) dataStr = line.slice(6).trim()
+            }
+            if (!eventType || !dataStr) continue
+
+            try {
+              const data = JSON.parse(dataStr)
+              switch (eventType) {
+                case "thinking":
+                  thoughtContent += (thoughtContent ? "\n" : "") + (data.text || "")
+                  setStreamBlocks([
+                    ...agentBlocks,
+                    { type: "thought", thoughtContent, content: "" },
+                  ])
+                  break
+                case "text":
+                  const chunk = data.chunk || ""
+                  const agentName = data.agent_name || "Assistant"
+                  if (!currentBlock || currentBlock.agentName !== agentName) {
+                    if (currentBlock) agentBlocks.push(currentBlock)
+                    currentBlock = { type: "agent", agentName, content: chunk }
+                  } else {
+                    currentBlock.content += chunk
+                  }
+                  setStreamBlocks([
+                    ...(thoughtContent ? [{ type: "thought" as const, thoughtContent, content: "" }] : []),
+                    ...agentBlocks,
+                    ...(currentBlock ? [currentBlock] : []),
+                  ])
+                  break
+                case "handoff":
+                  if (currentBlock) {
+                    agentBlocks.push(currentBlock)
+                    currentBlock = null
+                  }
+                  agentBlocks.push({
+                    type: "handoff",
+                    content: `${data.from_agent_name || "Agent"} → ${data.to_agent_name || "Agent"}`,
+                  })
+                  setStreamBlocks([
+                    ...(thoughtContent ? [{ type: "thought" as const, thoughtContent, content: "" }] : []),
+                    ...agentBlocks,
+                  ])
+                  break
+                case "end":
+                  break
+              }
+            } catch {
+              /* ignore parse errors */
+            }
+          }
+        }
+      }
+
+      setPendingUserMsg(null)
+      setStreamBlocks([])
       await fetchSession()
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send message")
+      setPendingUserMsg(null)
+      setStreamBlocks([])
     } finally {
       setSending(false)
     }
@@ -218,6 +318,30 @@ export function ChatArea({ sessionId, sessionTitle, onViewTopology }: ChatAreaPr
                 return null
             }
           })}
+
+          {/* Pending user message (optimistic) */}
+          {pendingUserMsg && <UserMessage key="pending-user" content={pendingUserMsg} />}
+
+          {/* Streaming blocks */}
+          {streamBlocks.map((block, i) => {
+            if (block.type === "thought" && block.thoughtContent) {
+              return <ThoughtBlock key={`stream-thought-${i}`} content={block.thoughtContent} />
+            }
+            if (block.type === "handoff") {
+              return <SystemEvent key={`stream-handoff-${i}`} content={block.content} />
+            }
+            if (block.type === "agent" && block.content) {
+              return (
+                <AgentMessage
+                  key={`stream-agent-${i}`}
+                  content={block.content}
+                  agentName={block.agentName}
+                />
+              )
+            }
+            return null
+          })}
+
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -227,7 +351,7 @@ export function ChatArea({ sessionId, sessionTitle, onViewTopology }: ChatAreaPr
           <textarea
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            placeholder="Send a message..."
+            placeholder="Send a message... (try @AgentName to mention)"
             rows={1}
             className="flex-1 resize-none rounded-lg border border-border bg-card px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
             aria-label="Message input"

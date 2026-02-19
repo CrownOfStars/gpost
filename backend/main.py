@@ -1,7 +1,9 @@
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, AsyncGenerator
 import json
 import uuid
 from openai import OpenAI
@@ -360,6 +362,117 @@ def update_session_graph(session_id: str, graph: dict, db: Session = Depends(get
     return {"ok": True}
 
 # --- Chat & Orchestration ---
+
+# --- SSE Stream Event Contract ---
+# event: thinking | text | handoff | end
+# data: JSON
+#
+# thinking: {"text": "..."}           - reasoning trace, append to thought block
+# text:     {"chunk": "x", "agent_id": "...", "agent_name": "..."}  - typewriter chunk
+# handoff:  {"from_agent_id", "from_agent_name", "to_agent_id", "to_agent_name"}  - agent switch
+# end:      {"message_id": "..."}      - stream complete
+
+def _sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+async def _mock_chat_stream(session_id: str, message: str) -> AsyncGenerator[str, None]:
+    """Mock streaming: thinking -> text (typewriter) -> handoff -> end."""
+    # 1. Parse @mentions (mock)
+    mentioned = [m.strip() for m in message.split() if m.startswith("@")]
+    agents_involved = ["Router Agent", "Coder Agent"] if not mentioned else [m for m in mentioned if m]
+
+    # 2. Thinking
+    yield _sse_event("thinking", {"text": f"User asked: '{message[:50]}...' Analyzing intent."})
+    await asyncio.sleep(0.5)
+    yield _sse_event("thinking", {"text": "Checking memory and context..."})
+    await asyncio.sleep(0.4)
+    yield _sse_event("thinking", {"text": "Drafting response..."})
+    await asyncio.sleep(0.3)
+
+    # 3. Text (typewriter) - first agent
+    full_text = f"[Mock] I received your message: {message}. "
+    for i, char in enumerate(full_text):
+        yield _sse_event("text", {"chunk": char, "agent_id": "router", "agent_name": agents_involved[0] if agents_involved else "Assistant"})
+        await asyncio.sleep(0.03)
+
+    # 4. Handoff (if multiple agents)
+    if len(agents_involved) > 1:
+        yield _sse_event("handoff", {
+            "from_agent_id": "router",
+            "from_agent_name": agents_involved[0],
+            "to_agent_id": "coder",
+            "to_agent_name": agents_involved[1],
+        })
+        await asyncio.sleep(0.3)
+        extra = " I'm the Coder Agent, ready to help with code."
+        for char in extra:
+            yield _sse_event("text", {"chunk": char, "agent_id": "coder", "agent_name": agents_involved[1]})
+            await asyncio.sleep(0.02)
+
+    # 5. End
+    yield _sse_event("end", {"message_id": ""})
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: schemas.ChatRequest, db: Session = Depends(get_db)):
+    """
+    SSE streaming chat. Saves user message, then streams: thinking -> text -> handoff? -> end.
+    """
+    session = db.query(models.Session).filter(models.Session.id == request.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    user_msg = models.Message(
+        session_id=request.session_id,
+        role="user",
+        content=request.message,
+        msg_type="text",
+    )
+    db.add(user_msg)
+    db.commit()
+
+    session_agents = db.query(models.SessionAgent).filter(
+        models.SessionAgent.session_id == request.session_id
+    ).all()
+    agent_id = session_agents[0].original_agent_id if session_agents else None
+
+    async def _stream_with_save():
+        full_content: List[str] = []
+        async for sse_chunk in _mock_chat_stream(request.session_id, request.message):
+            if "event: text" in sse_chunk and "data:" in sse_chunk:
+                try:
+                    data_part = sse_chunk.split("data:", 1)[1].strip().split("\n")[0]
+                    j = json.loads(data_part)
+                    full_content.append(j.get("chunk", ""))
+                except (IndexError, json.JSONDecodeError):
+                    pass
+            yield sse_chunk
+
+        # Save assistant message after stream ends
+        content = "".join(full_content)
+        if content:
+            bot_msg = models.Message(
+                session_id=request.session_id,
+                role="assistant",
+                agent_id=agent_id,
+                content=content,
+                thought_process="[]",
+                msg_type="text",
+            )
+            db.add(bot_msg)
+            db.commit()
+
+    return StreamingResponse(
+        _stream_with_save(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
 
 @app.post("/api/chat/send")
 def send_message(request: schemas.ChatRequest, db: Session = Depends(get_db)):
